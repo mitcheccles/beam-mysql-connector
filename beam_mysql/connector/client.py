@@ -131,7 +131,7 @@ class MySQLClient:
             else:
                 return total_number
 
-    def record_loader(self, query: str):
+    def record_loader(self, query: str, values: list):
         """
         Load dict record into mysql.
 
@@ -147,7 +147,7 @@ class MySQLClient:
             cur = conn.cursor()
 
             try:
-                cur.execute(query)
+                cur.executemany(query, values)
                 conn.commit()
                 logger.info(f"Successfully execute query: {query}")
             except MySQLConnectorError as e:

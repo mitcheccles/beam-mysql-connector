@@ -53,8 +53,9 @@ class WriteToMySQL(PTransform):
         table: Union[str, ValueProvider],
         user: Union[str, ValueProvider],
         password: Union[str, ValueProvider],
+        write_columns: list,
         port: Union[int, ValueProvider] = 3306,
-        batch_size: int = 1000,
+        batch_size: int = 1000
     ):
         super().__init__()
         self._host = host
@@ -62,13 +63,14 @@ class WriteToMySQL(PTransform):
         self._table = table
         self._user = user
         self._password = password
+        self._write_columns = write_columns
         self._port = port
         self._batch_size = batch_size
 
     def expand(self, pcoll: PCollection) -> PCollection:
         return pcoll | beam.ParDo(
             _WriteToMySQLFn(
-                self._host, self._database, self._table, self._user, self._password, self._port, self._batch_size
+                self._host, self._database, self._table, self._user, self._password, self._write_columns, self._port, self._batch_size
             )
         )
 
@@ -83,6 +85,7 @@ class _WriteToMySQLFn(beam.DoFn):
         table: Union[str, ValueProvider],
         user: Union[str, ValueProvider],
         password: Union[str, ValueProvider],
+        write_columns: list,
         port: Union[int, ValueProvider],
         batch_size: int,
     ):
@@ -93,7 +96,9 @@ class _WriteToMySQLFn(beam.DoFn):
         self._user = user
         self._password = password
         self._port = port
+        self._write_columns = write_columns
         self._batch_size = batch_size
+        self._prepared_statement = self.__build_prepared_statement()
 
         self._config = {
             "host": self._host,
@@ -103,36 +108,33 @@ class _WriteToMySQLFn(beam.DoFn):
             "port": self._port,
         }
 
+    def __build_prepared_statement(self):
+        return """
+        INSERT INTO {table} ({columns}) VALUES ({values})
+        """.format(
+            table=self._table,
+            columns=",".join(self._write_columns),
+            values=",".join(["%s" for x in self._write_columns])
+            )
+
     def start_bundle(self):
         self._build_value()
         self._queries = []
 
     def process(self, element: Dict, *args, **kwargs):
-        columns = []
-        values = []
-        for column, value in element.items():
-            columns.append(column)
-            values.append(value)
-
-        column_str = ", ".join(columns)
-        value_str = ", ".join(
-            [
-                f"{'NULL' if value is None else value}" if isinstance(value, (type(None), int, float)) else f"'{value}'"
-                for value in values
-            ]
-        )
-
-        query = f"INSERT INTO {self._config['database']}.{self._table}({column_str}) VALUES({value_str});"
+        query = []
+        for col in self._write_columns:
+            query.append(element[col])
 
         self._queries.append(query)
 
         if len(self._queries) > self._batch_size:
-            self._client.record_loader("\n".join(self._queries))
+            self._client.record_loader(self._prepared_statement, self._queries)
             self._queries.clear()
 
     def finish_bundle(self):
         if len(self._queries):
-            self._client.record_loader("\n".join(self._queries))
+            self._client.record_loader(self._prepared_statement, self._queries)
             self._queries.clear()
 
     def _build_value(self):
